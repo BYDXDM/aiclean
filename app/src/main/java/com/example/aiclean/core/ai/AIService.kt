@@ -42,21 +42,21 @@ class AIService @Inject constructor(
             
             // OpenAI format: {"data": [{"id": "model-name", ...}, ...]}
             val dataArray = jsonResponse.getAsJsonArray("data")
+            val models = mutableListOf<String>()
+            
             if (dataArray != null) {
-                return@withContext dataArray.map { element ->
-                    element.asJsonObject.get("id").asString
-                }.sorted()
+                for (i in 0 until dataArray.size()) {
+                    val element = dataArray[i].asJsonObject
+                    val id = element.get("id")?.asString
+                    val modelName = element.get("model_name")?.asString
+                    val name = id ?: modelName ?: ""
+                    if (name.isNotEmpty()) {
+                        models.add(name)
+                    }
+                }
             }
             
-            // DashScope format: {"data": [{"model_name": "...", ...}, ...]}
-            if (dataArray != null) {
-                return@withContext dataArray.map { element ->
-                    val obj = element.asJsonObject
-                    obj.get("id")?.asString ?: obj.get("model_name")?.asString ?: ""
-                }.filter { it.isNotEmpty() }.sorted()
-            }
-            
-            emptyList()
+            return@withContext models.sorted()
         } catch (e: Exception) {
             throw Exception("获取模型列表失败: ${e.message}")
         }
