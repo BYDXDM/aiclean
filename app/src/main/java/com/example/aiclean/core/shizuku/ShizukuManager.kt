@@ -1,10 +1,7 @@
 package com.example.aiclean.core.shizuku
 
-import android.content.ComponentName
 import android.content.Context
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.os.IBinder
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -12,7 +9,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
-import rikka.shizuku.ShizukuProvider
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -94,7 +90,8 @@ class ShizukuManager @Inject constructor(
                 )
             }
 
-            val process = Shizuku.newProcess(arrayOf("sh", "-c", command), null, null)
+            // Use Runtime.exec with sh -c since Shizuku.newProcess is private
+            val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
             val output = process.inputStream.bufferedReader().readText()
             val error = process.errorStream.bufferedReader().readText()
             val exitCode = process.waitFor()

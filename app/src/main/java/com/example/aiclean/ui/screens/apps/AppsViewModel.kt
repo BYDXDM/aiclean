@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.aiclean.core.ai.AIConfig
 import com.example.aiclean.core.ai.AIService
 import com.example.aiclean.core.ai.AppInfoForAI
-import com.example.aiclean.core.cleaner.CleanResult
 import com.example.aiclean.core.cleaner.StorageCleaner
 import com.example.aiclean.core.scanner.AppInfo
 import com.example.aiclean.core.scanner.StorageScanner
@@ -14,6 +13,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -104,7 +104,7 @@ class AppsViewModel @Inject constructor(
             _uiState.value = _uiState.value.copy(isAnalyzing = true, error = null)
 
             try {
-                val apiKey = settingsRepository.apiKey.value
+                val apiKey = settingsRepository.apiKey.first()
                 if (apiKey.isBlank()) {
                     _uiState.value = _uiState.value.copy(
                         isAnalyzing = false,
@@ -113,15 +113,15 @@ class AppsViewModel @Inject constructor(
                     return@launch
                 }
 
-                val provider = settingsRepository.aiProvider.value
+                val provider = settingsRepository.aiProvider.first()
                 val baseConfig = AIService.DEFAULT_CONFIGS[provider] ?: AIService.DEFAULT_CONFIGS["openai"]!!
 
                 val config = baseConfig.copy(
                     apiKey = apiKey,
-                    baseUrl = settingsRepository.aiBaseUrl.value,
-                    model = settingsRepository.aiModel.value,
-                    maxTokens = settingsRepository.aiMaxTokens.value,
-                    temperature = settingsRepository.aiTemperature.value
+                    baseUrl = settingsRepository.aiBaseUrl.first(),
+                    model = settingsRepository.aiModel.first(),
+                    maxTokens = settingsRepository.aiMaxTokens.first(),
+                    temperature = settingsRepository.aiTemperature.first()
                 )
 
                 val appsForAI = _uiState.value.apps.map { app ->

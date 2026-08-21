@@ -13,13 +13,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CleaningServices
-import androidx.compose.material.icons.filled.Duplicate
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
@@ -49,6 +48,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.example.aiclean.core.scanner.ScanPhase
+import com.example.aiclean.core.scanner.ScanResult
+import com.example.aiclean.core.scanner.StorageStats
 import com.example.aiclean.ui.components.AccessLevelCard
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -145,7 +147,7 @@ fun HomeScreen(
 
                         ActionCard(
                             modifier = Modifier.weight(1f),
-                            icon = Icons.Default.Duplicate,
+                            icon = Icons.Default.ContentCopy,
                             title = "Duplicates",
                             subtitle = "${formatSize(uiState.scanResult?.duplicateSize ?: 0)}",
                             color = Color(0xFFFF9800),
