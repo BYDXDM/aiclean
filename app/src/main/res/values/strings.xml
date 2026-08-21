@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">AIClean</string>
+    <string name="home">Home</string>
+    <string name="settings">Settings</string>
+    <string name="apps">Apps</string>
+    <string name="duplicates">Duplicates</string>
+    <string name="storage">Storage</string>
+    <string name="scan">Scan</string>
+    <string name="clean">Clean</string>
+    <string name="analyze">Analyze</string>
+    <string name="ai_analysis">AI Analysis</string>
+    <string name="api_key">API Key</string>
+    <string name="ai_provider">AI Provider</string>
+    <string name="model">Model</string>
+    <string name="base_url">Base URL</string>
+    <string name="max_tokens">Max Tokens</string>
+    <string name="temperature">Temperature</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="delete">Delete</string>
+    <string name="confirm">Confirm</string>
+    <string name="loading">Loading...</string>
+    <string name="scanning">Scanning...</string>
+    <string name="analyzing">Analyzing with AI...</string>
+    <string name="cleaning">Cleaning...</string>
+    <string name="error">Error</string>
+    <string name="success">Success</string>
+    <string name="no_apps_selected">No apps selected</string>
+    <string name="configure_api_key">Please configure your API key in Settings</string>
+</resources>
