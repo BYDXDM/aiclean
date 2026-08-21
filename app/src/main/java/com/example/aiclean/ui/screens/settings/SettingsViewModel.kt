@@ -2,11 +2,13 @@ package com.example.aiclean.ui.screens.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.aiclean.core.ai.AIService
 import com.example.aiclean.core.settings.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -17,12 +19,16 @@ data class SettingsUiState(
     val model: String = "gpt-3.5-turbo",
     val maxTokens: Int = 1000,
     val temperature: Float = 0.7f,
-    val isSaved: Boolean = false
+    val isSaved: Boolean = false,
+    val availableModels: List<String> = emptyList(),
+    val isFetchingModels: Boolean = false,
+    val fetchModelsError: String? = null
 )
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    private val aiService: AIService
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -87,7 +93,9 @@ class SettingsViewModel @Inject constructor(
             selectedProvider = provider,
             model = defaultModels[provider] ?: "gpt-3.5-turbo",
             baseUrl = defaultUrls[provider] ?: "https://api.openai.com/v1",
-            isSaved = false
+            isSaved = false,
+            availableModels = emptyList(),
+            fetchModelsError = null
         )
     }
 
@@ -105,6 +113,39 @@ class SettingsViewModel @Inject constructor(
 
     fun updateTemperature(temp: Float) {
         _uiState.value = _uiState.value.copy(temperature = temp, isSaved = false)
+    }
+
+    fun fetchModels() {
+        viewModelScope.launch {
+            val apiKey = _uiState.value.apiKey
+            val baseUrl = _uiState.value.baseUrl
+
+            if (apiKey.isBlank()) {
+                _uiState.value = _uiState.value.copy(
+                    fetchModelsError = "请先输入 API 密钥"
+                )
+                return@launch
+            }
+
+            _uiState.value = _uiState.value.copy(
+                isFetchingModels = true,
+                fetchModelsError = null
+            )
+
+            try {
+                val models = aiService.fetchModels(apiKey, baseUrl)
+                _uiState.value = _uiState.value.copy(
+                    isFetchingModels = false,
+                    availableModels = models,
+                    fetchModelsError = null
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isFetchingModels = false,
+                    fetchModelsError = "获取失败: ${e.message}"
+                )
+            }
+        }
     }
 
     fun saveSettings() {

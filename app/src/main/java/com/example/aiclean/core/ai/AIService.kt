@@ -23,13 +23,52 @@ class AIService @Inject constructor(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    suspend fun fetchModels(apiKey: String, baseUrl: String): List<String> = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url("$baseUrl/models")
+                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Content-Type", "application/json")
+                .get()
+                .build()
+
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                throw Exception("请求失败: ${response.code}")
+            }
+
+            val responseBody = response.body?.string() ?: throw Exception("响应为空")
+            val jsonResponse = JsonParser.parseString(responseBody).asJsonObject
+            
+            // OpenAI format: {"data": [{"id": "model-name", ...}, ...]}
+            val dataArray = jsonResponse.getAsJsonArray("data")
+            if (dataArray != null) {
+                return@withContext dataArray.map { element ->
+                    element.asJsonObject.get("id").asString
+                }.sorted()
+            }
+            
+            // DashScope format: {"data": [{"model_name": "...", ...}, ...]}
+            if (dataArray != null) {
+                return@withContext dataArray.map { element ->
+                    val obj = element.asJsonObject
+                    obj.get("id")?.asString ?: obj.get("model_name")?.asString ?: ""
+                }.filter { it.isNotEmpty() }.sorted()
+            }
+            
+            emptyList()
+        } catch (e: Exception) {
+            throw Exception("获取模型列表失败: ${e.message}")
+        }
+    }
+
     suspend fun analyzeApps(
         config: AIConfig,
         apps: List<AppInfoForAI>
     ): Result<AIAnalysisResult> = withContext(Dispatchers.IO) {
         try {
             if (config.apiKey.isBlank()) {
-                return@withContext Result.failure(Exception("API Key not configured"))
+                return@withContext Result.failure(Exception("API 密钥未配置"))
             }
 
             val prompt = buildAnalyzeAppsPrompt(apps)
@@ -48,7 +87,7 @@ class AIService @Inject constructor(
     ): Result<AICacheValue> = withContext(Dispatchers.IO) {
         try {
             if (config.apiKey.isBlank()) {
-                return@withContext Result.failure(Exception("API Key not configured"))
+                return@withContext Result.failure(Exception("API 密钥未配置"))
             }
 
             val prompt = buildCacheValuePrompt(packageName, cacheFiles)
@@ -66,7 +105,7 @@ class AIService @Inject constructor(
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
             if (config.apiKey.isBlank()) {
-                return@withContext Result.failure(Exception("API Key not configured"))
+                return@withContext Result.failure(Exception("API 密钥未配置"))
             }
 
             val response = callLLMWithMessages(config, messages)
@@ -103,14 +142,14 @@ class AIService @Inject constructor(
 
         val response = client.newCall(request).execute()
         if (!response.isSuccessful) {
-            throw Exception("API call failed: ${response.code} ${response.message}")
+            throw Exception("API 调用失败: ${response.code} ${response.message}")
         }
 
-        val responseBody = response.body?.string() ?: throw Exception("Empty response")
+        val responseBody = response.body?.string() ?: throw Exception("响应为空")
         val jsonResponse = JsonParser.parseString(responseBody).asJsonObject
         val choices = jsonResponse.getAsJsonArray("choices")
         if (choices.size() == 0) {
-            throw Exception("No response from AI")
+            throw Exception("AI 无响应")
         }
 
         return choices[0].asJsonObject
@@ -120,37 +159,37 @@ class AIService @Inject constructor(
 
     private fun buildAnalyzeAppsPrompt(apps: List<AppInfoForAI>): String {
         return buildString {
-            appendLine("Analyze the following Android apps and their storage usage.")
-            appendLine("For each app, determine:")
-            appendLine("1. Is the cache likely valuable or safe to clean?")
-            appendLine("2. Suggest an action: clean_cache, keep, review, or compress")
-            appendLine("3. Provide a brief reason")
-            appendLine("4. Rate confidence 0.0-1.0")
+            appendLine("分析以下 Android 应用的存储使用情况。")
+            appendLine("对每个应用判断：")
+            appendLine("1. 缓存是否有价值？是否可以安全清理？")
+            appendLine("2. 建议操作：clean_cache（清理缓存）、keep（保留）、review（审查）、compress（压缩）")
+            appendLine("3. 给出简要理由")
+            appendLine("4. 置信度 0.0-1.0")
             appendLine()
-            appendLine("Apps:")
+            appendLine("应用列表：")
             apps.forEach { app ->
                 appendLine("- ${app.appName} (${app.packageName})")
-                appendLine("  Cache: ${formatSize(app.cacheSize)}, Data: ${formatSize(app.dataSize)}")
-                appendLine("  Last used: ${app.lastUsedDaysAgo} days ago")
-                appendLine("  System app: ${app.isSystemApp}")
+                appendLine("  缓存: ${formatSize(app.cacheSize)}, 数据: ${formatSize(app.dataSize)}")
+                appendLine("  最后使用: ${if (app.lastUsedDaysAgo >= 0) "${app.lastUsedDaysAgo} 天前" else "未知"}")
+                appendLine("  系统应用: ${app.isSystemApp}")
             }
             appendLine()
-            appendLine("Respond in JSON format:")
-            appendLine("""{"summary": "...", "recommendations": [{"target": "package", "action": "...", "reason": "...", "confidence": 0.8, "estimatedSavings": 1234}]}""")
+            appendLine("请用 JSON 格式回复：")
+            appendLine("""{"summary": "...", "recommendations": [{"target": "包名", "action": "...", "reason": "...", "confidence": 0.8, "estimatedSavings": 1234}]}""")
         }
     }
 
     private fun buildCacheValuePrompt(packageName: String, cacheFiles: List<CacheFileInfo>): String {
         return buildString {
-            appendLine("Analyze cache files for app: $packageName")
-            appendLine("Determine the value of each cache type (0.0=worthless, 1.0=critical).")
+            appendLine("分析应用 $packageName 的缓存文件。")
+            appendLine("判断每种缓存类型的价值（0.0=无价值，1.0=关键）。")
             appendLine()
-            appendLine("Cache files:")
+            appendLine("缓存文件：")
             cacheFiles.forEach { file ->
                 appendLine("- ${file.path} (${formatSize(file.size)}, ${file.type})")
             }
             appendLine()
-            appendLine("Respond in JSON format:")
+            appendLine("请用 JSON 格式回复：")
             appendLine("""{"cacheType": "...", "value": 0.5, "reason": "..."}""")
         }
     }
@@ -159,7 +198,7 @@ class AIService @Inject constructor(
         return try {
             val json = JsonParser.parseString(response).asJsonObject
             AIAnalysisResult(
-                summary = json.get("summary")?.asString ?: "Analysis complete",
+                summary = json.get("summary")?.asString ?: "分析完成",
                 recommendations = json.getAsJsonArray("recommendations")?.map { element ->
                     val obj = element.asJsonObject
                     AIRecommendation(
@@ -186,14 +225,14 @@ class AIService @Inject constructor(
             val json = JsonParser.parseString(response).asJsonObject
             AICacheValue(
                 packageName = packageName,
-                cacheType = json.get("cacheType")?.asString ?: "unknown",
+                cacheType = json.get("cacheType")?.asString ?: "未知",
                 value = json.get("value")?.asFloat ?: 0.5f,
                 reason = json.get("reason")?.asString ?: ""
             )
         } catch (e: Exception) {
             AICacheValue(
                 packageName = packageName,
-                cacheType = "unknown",
+                cacheType = "未知",
                 value = 0.5f,
                 reason = response.take(100)
             )
@@ -210,11 +249,11 @@ class AIService @Inject constructor(
     }
 
     companion object {
-        private const val SYSTEM_PROMPT = """You are an Android storage optimization expert. 
-Analyze app storage data and provide actionable recommendations for cleaning.
-Be conservative - only recommend cleaning when confident it's safe.
-Consider: app usage patterns, cache types, system vs user apps, data importance.
-Always respond in valid JSON format."""
+        private const val SYSTEM_PROMPT = """你是一个 Android 存储优化专家。
+分析应用存储数据并提供可操作的清理建议。
+要保守——只在确信安全时才建议清理。
+考虑：应用使用频率、缓存类型、系统应用vs用户应用、数据重要性。
+请务必用有效的 JSON 格式回复。"""
 
         val DEFAULT_CONFIGS = mapOf(
             "openai" to AIConfig(
