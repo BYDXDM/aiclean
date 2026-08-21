@@ -27,130 +27,46 @@ class DuplicatesViewModel @Inject constructor(
     private val scanner: StorageScanner,
     private val cleaner: StorageCleaner
 ) : ViewModel() {
-
     private val _uiState = MutableStateFlow(DuplicatesUiState())
     val uiState: StateFlow<DuplicatesUiState> = _uiState.asStateFlow()
 
-    init {
-        scanDuplicates()
-    }
+    init { refresh() }
 
-    private fun scanDuplicates() {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
-
-            try {
-                val result = scanner.scanStorage()
-                // For now, we'll create mock duplicates since the scanner
-                // needs to be enhanced to return duplicates separately
-                // In a real implementation, scanner.findDuplicates() would be called
-                
-                // Mock data for demonstration
-                val mockDuplicates = listOf(
-                    DuplicateGroup(
-                        files = listOf(
-                            com.example.aiclean.core.scanner.FileInfo(
-                                path = "/storage/emulated/0/DCIM/photo1.jpg",
-                                size = 2_500_000,
-                                lastModified = System.currentTimeMillis(),
-                                category = "image"
-                            ),
-                            com.example.aiclean.core.scanner.FileInfo(
-                                path = "/storage/emulated/0/Pictures/photo1.jpg",
-                                size = 2_500_000,
-                                lastModified = System.currentTimeMillis(),
-                                category = "image"
-                            )
-                        ),
-                        totalSize = 2_500_000
-                    ),
-                    DuplicateGroup(
-                        files = listOf(
-                            com.example.aiclean.core.scanner.FileInfo(
-                                path = "/storage/emulated/0/Download/document.pdf",
-                                size = 5_000_000,
-                                lastModified = System.currentTimeMillis(),
-                                category = "other"
-                            ),
-                            com.example.aiclean.core.scanner.FileInfo(
-                                path = "/storage/emulated/0/Documents/document.pdf",
-                                size = 5_000_000,
-                                lastModified = System.currentTimeMillis(),
-                                category = "other"
-                            ),
-                            com.example.aiclean.core.scanner.FileInfo(
-                                path = "/storage/emulated/0/Backup/document.pdf",
-                                size = 5_000_000,
-                                lastModified = System.currentTimeMillis(),
-                                category = "other"
-                            )
-                        ),
-                        totalSize = 10_000_000
-                    )
-                )
-
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    duplicates = mockDuplicates,
-                    totalWastedSize = mockDuplicates.sumOf { it.totalSize }
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    error = e.message
-                )
-            }
+    fun refresh() = viewModelScope.launch {
+        _uiState.value = _uiState.value.copy(isLoading = true, error = null, deleteResult = null)
+        runCatching { scanner.scanDuplicates() }.onSuccess { groups ->
+            _uiState.value = _uiState.value.copy(
+                isLoading = false,
+                duplicates = groups,
+                totalWastedSize = groups.sumOf { it.totalSize },
+                selectedFiles = emptySet()
+            )
+        }.onFailure { e ->
+            _uiState.value = _uiState.value.copy(isLoading = false, error = "扫描失败：${e.message ?: "未知错误"}")
         }
     }
 
     fun toggleFile(path: String) {
         val current = _uiState.value.selectedFiles
+        _uiState.value = _uiState.value.copy(selectedFiles = if (path in current) current - path else current + path)
+    }
+
+    fun deleteSelected() = viewModelScope.launch {
+        val files = _uiState.value.selectedFiles.toList()
+        if (files.isEmpty()) return@launch
+        _uiState.value = _uiState.value.copy(isDeleting = true, deleteResult = null)
+        val result = cleaner.cleanJunkFiles(files)
         _uiState.value = _uiState.value.copy(
-            selectedFiles = if (current.contains(path)) {
-                current - path
-            } else {
-                current + path
-            }
+            isDeleting = false,
+            deleteResult = if (result.success) "已删除 ${result.cleanedFiles.size} 个文件，释放 ${formatSize(result.cleanedBytes)}" else result.message
         )
+        refresh()
     }
 
-    fun deleteSelected() {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isDeleting = true, deleteResult = null)
-
-            try {
-                val filesToDelete = _uiState.value.selectedFiles.toList()
-                val result = cleaner.cleanJunkFiles(filesToDelete)
-
-                if (result.success) {
-                    // Rescan to get updated list
-                    scanDuplicates()
-                    _uiState.value = _uiState.value.copy(
-                        isDeleting = false,
-                        selectedFiles = emptySet(),
-                        deleteResult = "Deleted ${result.cleanedFiles.size} files (${formatSize(result.cleanedBytes)})"
-                    )
-                } else {
-                    _uiState.value = _uiState.value.copy(
-                        isDeleting = false,
-                        deleteResult = "Some files failed to delete"
-                    )
-                }
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    isDeleting = false,
-                    error = e.message
-                )
-            }
-        }
-    }
-
-    private fun formatSize(bytes: Long): String {
-        return when {
-            bytes < 1024 -> "${bytes}B"
-            bytes < 1024 * 1024 -> "${bytes / 1024}KB"
-            bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)}MB"
-            else -> "${bytes / (1024 * 1024 * 1024)}GB"
-        }
+    private fun formatSize(bytes: Long) = when {
+        bytes < 1024 -> "${bytes}B"
+        bytes < 1024 * 1024 -> "${bytes / 1024}KB"
+        bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)}MB"
+        else -> "${bytes / (1024 * 1024 * 1024)}GB"
     }
 }

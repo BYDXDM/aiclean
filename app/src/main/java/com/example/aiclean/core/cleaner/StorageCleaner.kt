@@ -1,7 +1,6 @@
 package com.example.aiclean.core.cleaner
 
 import android.content.Context
-import android.util.Log
 import com.example.aiclean.core.root.RootManager
 import com.example.aiclean.core.shizuku.ShizukuManager
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -12,6 +11,7 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** 所有删除均只处理用户选中的公开文件；应用私有缓存仅在 Root 可用时按 cache 路径处理。 */
 @Singleton
 class StorageCleaner @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -19,223 +19,80 @@ class StorageCleaner @Inject constructor(
     private val shizukuManager: ShizukuManager
 ) {
     suspend fun cleanCache(packageName: String): CleanResult = withContext(Dispatchers.IO) {
-        try {
-            // Try Shizuku first (faster than root)
-            if (shizukuManager.isPermissionGranted.first()) {
-                val success = shizukuManager.cleanAppCache(packageName)
-                if (success) {
-                    return@withContext CleanResult(
-                        success = true,
-                        cleanedBytes = 0, // Actual size unknown with Shizuku
-                        cleanedFiles = listOf(packageName),
-                        message = "Cleaned cache for $packageName via Shizuku"
-                    )
-                }
-            }
-
-            // Try Root
-            if (rootManager.isRootAvailable()) {
-                val success = rootManager.cleanAppCacheAsRoot(packageName)
-                if (success) {
-                    return@withContext CleanResult(
-                        success = true,
-                        cleanedBytes = 0,
-                        cleanedFiles = listOf(packageName),
-                        message = "Cleaned cache for $packageName via Root"
-                    )
-                }
-            }
-
-            // Fallback to standard method
-            val packageManager = context.packageManager
-            val appInfo = packageManager.getApplicationInfo(packageName, 0)
-
-            var cleanedBytes = 0L
-            val cleanedFiles = mutableListOf<String>()
-
-            // Clean internal cache
-            val cacheDir = File(appInfo.dataDir, "cache")
-            if (cacheDir.exists() && cacheDir.canWrite()) {
-                val size = cacheDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-                cacheDir.deleteRecursively()
-                cleanedBytes += size
-                cleanedFiles.add(cacheDir.path)
-            }
-
-            // Clean code cache
-            val codeCacheDir = File(appInfo.dataDir, "code_cache")
-            if (codeCacheDir.exists() && codeCacheDir.canWrite()) {
-                val size = codeCacheDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-                codeCacheDir.deleteRecursively()
-                cleanedBytes += size
-                cleanedFiles.add(codeCacheDir.path)
-            }
-
-            // Clean external cache
-            val externalCacheDir = context.getExternalFilesDir(null)?.let {
-                File(it.parentFile, "$packageName/cache")
-            }
-            if (externalCacheDir != null && externalCacheDir.exists() && externalCacheDir.canWrite()) {
-                val size = externalCacheDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-                externalCacheDir.deleteRecursively()
-                cleanedBytes += size
-                cleanedFiles.add(externalCacheDir.path)
-            }
-
-            CleanResult(
-                success = true,
-                cleanedBytes = cleanedBytes,
-                cleanedFiles = cleanedFiles,
-                message = "Cleaned ${formatSize(cleanedBytes)} from $packageName"
+        if (rootManager.isRootAvailable()) {
+            // pm clear 会删除应用数据，绝不能用于“清缓存”。只触及 cache 与 code_cache。
+            val safePackage = packageName.takeIf { it.matches(Regex("[A-Za-z0-9._]+")) }
+                ?: return@withContext CleanResult(false, 0, emptyList(), "无效的应用包名")
+            val paths = listOf(
+                "/data/user/0/$safePackage/cache",
+                "/data/user/0/$safePackage/code_cache",
+                "/data/data/$safePackage/cache",
+                "/data/data/$safePackage/code_cache"
             )
-        } catch (e: Exception) {
-            Log.e("StorageCleaner", "Error cleaning $packageName: ${e.message}")
-            CleanResult(
-                success = false,
-                cleanedBytes = 0,
-                cleanedFiles = emptyList(),
-                message = "Failed to clean $packageName: ${e.message}"
-            )
+            val command = paths.joinToString("; ") { "rm -rf '$it'" }
+            val result = rootManager.executeCommand(command)
+            return@withContext if (result.success) {
+                CleanResult(true, 0, listOf(packageName), "已通过 Root 清理 ${packageName} 的缓存")
+            } else CleanResult(false, 0, emptyList(), "Root 清理失败：${result.error ?: "未知错误"}")
         }
+
+        // Android 沙盒禁止普通应用访问其它应用私有缓存；明确告知而非伪造清理成功。
+        CleanResult(false, 0, emptyList(), "普通权限无法清理其它应用缓存。请启用 Root，或在系统设置中清理该应用缓存。")
     }
 
     suspend fun cleanJunkFiles(files: List<String>): CleanResult = withContext(Dispatchers.IO) {
-        var cleanedBytes = 0L
-        val cleanedFiles = mutableListOf<String>()
+        var cleaned = 0L
+        val deleted = mutableListOf<String>()
         val errors = mutableListOf<String>()
-
-        files.forEach { filePath ->
+        files.distinct().forEach { path ->
+            val file = File(path)
+            if (!isPublicStoragePath(file)) {
+                errors += "拒绝删除非公开路径：$path"
+                return@forEach
+            }
             try {
-                val file = File(filePath)
-                if (file.exists()) {
-                    val size = file.length()
-                    
-                    // Try Shizuku
-                    if (shizukuManager.isPermissionGranted.first()) {
-                        val success = shizukuManager.deleteFile(filePath)
-                        if (success) {
-                            cleanedBytes += size
-                            cleanedFiles.add(filePath)
-                            return@forEach
-                        }
-                    }
-
-                    // Try Root
-                    if (rootManager.isRootAvailable()) {
-                        val success = rootManager.deleteFileAsRoot(filePath)
-                        if (success) {
-                            cleanedBytes += size
-                            cleanedFiles.add(filePath)
-                            return@forEach
-                        }
-                    }
-
-                    // Fallback
-                    if (file.delete()) {
-                        cleanedBytes += size
-                        cleanedFiles.add(filePath)
-                    } else {
-                        errors.add("Failed to delete: $filePath")
-                    }
+                val size = if (file.isFile) file.length() else directorySize(file)
+                val success = when {
+                    file.deleteRecursively() -> true
+                    rootManager.isRootAvailable() -> rootManager.deleteFileAsRoot(file.absolutePath)
+                    else -> false
                 }
+                if (success) {
+                    cleaned += size
+                    deleted += path
+                } else errors += "无法删除：$path"
             } catch (e: Exception) {
-                errors.add("Error deleting $filePath: ${e.message}")
+                errors += "删除失败：${e.message ?: path}"
             }
         }
-
         CleanResult(
             success = errors.isEmpty(),
-            cleanedBytes = cleanedBytes,
-            cleanedFiles = cleanedFiles,
-            message = if (errors.isEmpty()) {
-                "Cleaned ${cleanedFiles.size} files (${formatSize(cleanedBytes)})"
-            } else {
-                "Cleaned ${cleanedFiles.size} files, ${errors.size} errors"
-            }
+            cleanedBytes = cleaned,
+            cleanedFiles = deleted,
+            message = if (errors.isEmpty()) "已清理 ${deleted.size} 个文件，释放 ${formatSize(cleaned)}" else "已清理 ${deleted.size} 个文件；${errors.size} 个文件未能删除"
         )
     }
 
-    suspend fun cleanDuplicates(files: List<List<String>>): CleanResult = withContext(Dispatchers.IO) {
-        var cleanedBytes = 0L
-        val cleanedFiles = mutableListOf<String>()
-
-        files.forEach { duplicateGroup ->
-            // Keep the first file, delete the rest
-            if (duplicateGroup.size > 1) {
-                duplicateGroup.drop(1).forEach { filePath ->
-                    try {
-                        val file = File(filePath)
-                        if (file.exists()) {
-                            val size = file.length()
-                            
-                            // Try Shizuku
-                            if (shizukuManager.isPermissionGranted.first()) {
-                                val success = shizukuManager.deleteFile(filePath)
-                                if (success) {
-                                    cleanedBytes += size
-                                    cleanedFiles.add(filePath)
-                                    return@forEach
-                                }
-                            }
-
-                            // Try Root
-                            if (rootManager.isRootAvailable()) {
-                                val success = rootManager.deleteFileAsRoot(filePath)
-                                if (success) {
-                                    cleanedBytes += size
-                                    cleanedFiles.add(filePath)
-                                    return@forEach
-                                }
-                            }
-
-                            // Fallback
-                            if (file.delete()) {
-                                cleanedBytes += size
-                                cleanedFiles.add(filePath)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e("StorageCleaner", "Error deleting duplicate $filePath: ${e.message}")
-                    }
-                }
-            }
-        }
-
-        CleanResult(
-            success = true,
-            cleanedBytes = cleanedBytes,
-            cleanedFiles = cleanedFiles,
-            message = "Removed ${cleanedFiles.size} duplicate files (${formatSize(cleanedBytes)})"
-        )
+    suspend fun getAccessLevel(): AccessLevel = when {
+        rootManager.isRootAvailable() -> AccessLevel.ROOT
+        shizukuManager.isPermissionGranted.first() -> AccessLevel.SHIZUKU
+        else -> AccessLevel.NORMAL
     }
 
-    suspend fun getAccessLevel(): AccessLevel {
-        return when {
-            shizukuManager.isPermissionGranted.first() -> AccessLevel.SHIZUKU
-            rootManager.isRootAvailable() -> AccessLevel.ROOT
-            else -> AccessLevel.NORMAL
-        }
+    private fun isPublicStoragePath(file: File): Boolean {
+        val root = android.os.Environment.getExternalStorageDirectory().canonicalFile
+        return runCatching { file.canonicalFile.path.startsWith(root.path + File.separator) }.getOrDefault(false)
     }
 
-    private fun formatSize(bytes: Long): String {
-        return when {
-            bytes < 1024 -> "${bytes}B"
-            bytes < 1024 * 1024 -> "${bytes / 1024}KB"
-            bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)}MB"
-            else -> "${bytes / (1024 * 1024 * 1024)}GB"
-        }
+    private fun directorySize(file: File): Long = if (file.isFile) file.length() else file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+
+    private fun formatSize(bytes: Long) = when {
+        bytes < 1024 -> "${bytes}B"
+        bytes < 1024 * 1024 -> "${bytes / 1024}KB"
+        bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)}MB"
+        else -> "${bytes / (1024 * 1024 * 1024)}GB"
     }
 }
 
-data class CleanResult(
-    val success: Boolean,
-    val cleanedBytes: Long,
-    val cleanedFiles: List<String>,
-    val message: String
-)
-
-enum class AccessLevel {
-    NORMAL,
-    ROOT,
-    SHIZUKU
-}
+data class CleanResult(val success: Boolean, val cleanedBytes: Long, val cleanedFiles: List<String>, val message: String)
+enum class AccessLevel { NORMAL, ROOT, SHIZUKU }

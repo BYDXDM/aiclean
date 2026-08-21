@@ -1,10 +1,14 @@
 package com.example.aiclean.core.scanner
 
+import android.app.usage.StorageStatsManager
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Environment
 import android.os.StatFs
+import android.os.UserHandle
+import android.os.storage.StorageManager
+import android.provider.Settings
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +20,10 @@ import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * 仅扫描应用可合法访问的公开共享存储；不会伪造其它应用私有目录的数据。
+ * 应用体积/缓存统计需要“查看使用情况”授权，未授权时会显示为 0。
+ */
 @Singleton
 class StorageScanner @Inject constructor(
     @ApplicationContext private val context: Context
@@ -24,242 +32,198 @@ class StorageScanner @Inject constructor(
     val progress: StateFlow<ScanProgress> = _progress
 
     suspend fun scanStorage(): ScanResult = withContext(Dispatchers.IO) {
-        _progress.value = ScanProgress("Starting scan...", 0, 0, ScanPhase.INITIALIZING)
-
+        _progress.value = ScanProgress("正在初始化扫描", 0, 0, ScanPhase.INITIALIZING)
         val apps = scanApps()
-        val junkFiles = scanJunkFiles()
-        val duplicates = findDuplicates(junkFiles)
+        val publicFiles = scanPublicFiles()
+        val junkFiles = publicFiles.filter { it.isJunk }.sortedByDescending { it.size }
+        val duplicates = findDuplicates(publicFiles)
+        val categories = publicFiles.groupBy { it.category }.map { (category, files) ->
+            FileCategoryStat(category, files.sumOf { it.size }, files.size)
+        }.sortedByDescending { it.size }
 
-        val totalCache = apps.sumOf { it.cacheSize }
-        val totalJunk = junkFiles.filter { it.isJunk }.sumOf { it.size }
-        val totalDuplicate = duplicates.sumOf { it.totalSize }
-
-        _progress.value = ScanProgress("Scan complete", 100, 100, ScanPhase.COMPLETED)
-
+        _progress.value = ScanProgress("扫描完成", publicFiles.size, publicFiles.size, ScanPhase.COMPLETED)
         ScanResult(
-            totalSize = totalCache + totalJunk + totalDuplicate,
-            cacheSize = totalCache,
-            junkSize = totalJunk,
-            duplicateSize = totalDuplicate,
+            cacheSize = apps.sumOf { it.cacheSize },
+            junkSize = junkFiles.sumOf { it.size },
+            duplicateSize = duplicates.sumOf { it.totalSize },
             appCount = apps.size,
-            apps = apps
+            apps = apps,
+            junkFiles = junkFiles,
+            duplicates = duplicates,
+            categories = categories,
+            scannedFileCount = publicFiles.size,
+            scanTruncated = publicFiles.size >= MAX_SCANNED_FILES
         )
     }
 
-    private suspend fun scanApps(): List<AppInfo> {
-        _progress.value = ScanProgress("Scanning apps...", 0, 100, ScanPhase.SCANNING_CACHE)
+    suspend fun scanDuplicates(): List<DuplicateGroup> = withContext(Dispatchers.IO) {
+        findDuplicates(scanPublicFiles())
+    }
 
-        val packageManager = context.packageManager
-        val packages = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
-        val apps = mutableListOf<AppInfo>()
+    suspend fun scanJunkFiles(): List<FileInfo> = withContext(Dispatchers.IO) {
+        scanPublicFiles().filter { it.isJunk }.sortedByDescending { it.size }
+    }
 
-        packages.forEachIndexed { index, appInfo ->
-            _progress.value = ScanProgress(
-                appInfo.packageName,
-                index,
-                packages.size,
-                ScanPhase.SCANNING_CACHE
+    private fun scanApps(): List<AppInfo> {
+        _progress.value = ScanProgress("正在读取应用存储", 0, 0, ScanPhase.SCANNING_CACHE)
+        val pm = context.packageManager
+        @Suppress("DEPRECATION")
+        val packages = pm.getInstalledApplications(0)
+        return packages.mapIndexed { index, app ->
+            _progress.value = ScanProgress(app.packageName, index + 1, packages.size, ScanPhase.SCANNING_CACHE)
+            val stats = getPackageStats(app.packageName, app.uid)
+            AppInfo(
+                packageName = app.packageName,
+                appName = app.loadLabel(pm).toString(),
+                cacheSize = stats?.cacheBytes ?: 0L,
+                dataSize = stats?.dataBytes ?: 0L,
+                totalSize = (stats?.appBytes ?: 0L) + (stats?.dataBytes ?: 0L) + (stats?.cacheBytes ?: 0L),
+                lastUsed = getLastUsedTime(app.packageName),
+                isSystemApp = app.flags and ApplicationInfo.FLAG_SYSTEM != 0
             )
-
-            try {
-                val cacheDir = File(appInfo.dataDir, "cache")
-                val codeCacheDir = File(appInfo.dataDir, "code_cache")
-                val externalCacheDir = context.getExternalFilesDir(null)?.let {
-                    File(it.parentFile, "${appInfo.packageName}/cache")
-                }
-
-                val cacheSize = calculateDirSize(cacheDir) +
-                        calculateDirSize(codeCacheDir) +
-                        calculateDirSize(externalCacheDir)
-
-                val dataSize = calculateDirSize(File(appInfo.dataDir)) - cacheSize
-
-                val lastUsed = getLastUsedTime(appInfo.packageName)
-
-                apps.add(
-                    AppInfo(
-                        packageName = appInfo.packageName,
-                        appName = appInfo.loadLabel(packageManager).toString(),
-                        cacheSize = cacheSize,
-                        dataSize = dataSize,
-                        totalSize = cacheSize + dataSize,
-                        lastUsed = lastUsed,
-                        isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                    )
-                )
-            } catch (e: Exception) {
-                Log.e("StorageScanner", "Error scanning ${appInfo.packageName}: ${e.message}")
-            }
-        }
-
-        return apps.sortedByDescending { it.totalSize }
+        }.sortedByDescending { it.totalSize }
     }
 
-    private suspend fun scanJunkFiles(): List<FileInfo> {
-        _progress.value = ScanProgress("Scanning junk files...", 0, 0, ScanPhase.SCANNING_JUNK)
-
-        val junkFiles = mutableListOf<FileInfo>()
-        val externalStorage = Environment.getExternalStorageDirectory()
-
-        scanDirectory(externalStorage, junkFiles, 0, maxDepth = 5)
-
-        return junkFiles
+    private fun getPackageStats(packageName: String, uid: Int): android.app.usage.StorageStats? = try {
+        val manager = context.getSystemService(StorageStatsManager::class.java)
+        manager.queryStatsForPackage(StorageManager.UUID_DEFAULT, packageName, UserHandle.getUserHandleForUid(uid))
+    } catch (e: Exception) {
+        null
     }
 
-    private fun scanDirectory(
-        dir: File,
-        results: MutableList<FileInfo>,
-        currentDepth: Int,
-        maxDepth: Int
-    ) {
-        if (currentDepth > maxDepth || !dir.canRead()) return
+    private fun scanPublicFiles(): List<FileInfo> {
+        _progress.value = ScanProgress("正在扫描公开文件", 0, 0, ScanPhase.SCANNING_JUNK)
+        val output = ArrayList<FileInfo>()
+        val root = Environment.getExternalStorageDirectory()
+        scanDirectory(root, output, 0)
+        return output
+    }
 
-        try {
-            dir.listFiles()?.forEach { file ->
-                if (file.isFile) {
-                    val fileInfo = analyzeFile(file)
-                    results.add(fileInfo)
-                } else if (file.isDirectory) {
-                    scanDirectory(file, results, currentDepth + 1, maxDepth)
+    private fun scanDirectory(dir: File, output: MutableList<FileInfo>, depth: Int) {
+        if (depth > MAX_DEPTH || output.size >= MAX_SCANNED_FILES || !dir.canRead() || shouldSkipDirectory(dir)) return
+        val children = try { dir.listFiles() } catch (_: Exception) { null } ?: return
+        for (file in children) {
+            if (output.size >= MAX_SCANNED_FILES) return
+            if (file.isDirectory) scanDirectory(file, output, depth + 1)
+            else if (file.isFile && file.length() > 0) {
+                output.add(analyzeFile(file))
+                if (output.size % 100 == 0) {
+                    _progress.value = ScanProgress(file.absolutePath, output.size, 0, ScanPhase.SCANNING_JUNK)
                 }
             }
-        } catch (e: Exception) {
-            Log.e("StorageScanner", "Error scanning ${dir.path}: ${e.message}")
         }
+    }
+
+    private fun shouldSkipDirectory(dir: File): Boolean {
+        val path = dir.absolutePath.lowercase()
+        return path.endsWith("/android/data") || path.endsWith("/android/obb") ||
+            path.contains("/.trash") || path.contains("/.git")
     }
 
     private fun analyzeFile(file: File): FileInfo {
         val extension = file.extension.lowercase()
         val path = file.absolutePath.lowercase()
-
-        val isJunk = when {
-            // Temporary files
-            extension in listOf("tmp", "temp", "log", "bak", "old", "swp") -> true
-            path.contains("/cache/") -> true
-            path.contains("/temp/") -> true
-            path.contains("/tmp/") -> true
-            // Download partial files
-            extension == "crdownload" || extension == "part" -> true
-            // Thumbnail caches
-            path.contains(".thumbnails") || path.contains("thumbcache") -> true
-            // App leftovers
-            path.contains("/tombstones/") -> true
-            else -> false
+        val junkType = when {
+            extension in TEMP_EXTENSIONS || path.contains("/temp/") || path.contains("/tmp/") -> "temp"
+            extension == "log" || path.contains("/log/") -> "log"
+            extension == "crdownload" || extension == "part" || extension == "download" -> "partial"
+            path.contains(".thumbnails") || path.contains("thumbcache") -> "thumbnail"
+            path.contains("/cache/") -> "cache"
+            extension in setOf("apk", "xapk", "apks") && isOld(file, 14) -> "installer"
+            else -> null
         }
-
-        val category = categorizeFile(file)
-
         return FileInfo(
             path = file.absolutePath,
             size = file.length(),
             lastModified = file.lastModified(),
-            isJunk = isJunk,
-            junkConfidence = if (isJunk) 0.8f else 0.2f,
-            category = category
+            isJunk = junkType != null,
+            junkConfidence = when (junkType) {
+                "temp", "log", "partial", "thumbnail" -> 0.95f
+                "cache" -> 0.75f
+                "installer" -> 0.65f
+                else -> 0f
+            },
+            category = categorizeFile(file),
+            junkType = junkType
         )
     }
 
-    private fun categorizeFile(file: File): String {
-        val extension = file.extension.lowercase()
-        return when {
-            extension in listOf("jpg", "jpeg", "png", "gif", "webp", "bmp") -> "image"
-            extension in listOf("mp4", "avi", "mkv", "mov", "3gp") -> "video"
-            extension in listOf("mp3", "wav", "aac", "flac", "ogg") -> "audio"
-            extension in listOf("db", "sqlite", "sqlite3") -> "database"
-            extension in listOf("log", "txt") -> "text"
-            extension in listOf("apk", "xapk") -> "installer"
-            extension in listOf("zip", "rar", "7z", "tar", "gz") -> "archive"
-            else -> "other"
-        }
+    private fun isOld(file: File, days: Int): Boolean =
+        System.currentTimeMillis() - file.lastModified() > days * 24L * 60 * 60 * 1000
+
+    private fun categorizeFile(file: File): String = when (file.extension.lowercase()) {
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic" -> "image"
+        "mp4", "avi", "mkv", "mov", "3gp", "webm" -> "video"
+        "mp3", "wav", "aac", "flac", "ogg", "m4a" -> "audio"
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub" -> "document"
+        "apk", "xapk", "apks" -> "installer"
+        "zip", "rar", "7z", "tar", "gz" -> "archive"
+        else -> "other"
     }
 
-    private suspend fun findDuplicates(files: List<FileInfo>): List<DuplicateGroup> {
-        _progress.value = ScanProgress("Finding duplicates...", 0, 0, ScanPhase.FINDING_DUPLICATES)
-
-        val sizeGroups = files.filter { it.size > 1024 } // Only check files > 1KB
+    private fun findDuplicates(files: List<FileInfo>): List<DuplicateGroup> {
+        _progress.value = ScanProgress("正在比对重复文件", 0, 0, ScanPhase.FINDING_DUPLICATES)
+        val output = mutableListOf<DuplicateGroup>()
+        val candidates = files.asSequence()
+            .filter { it.size in MIN_DUPLICATE_SIZE..MAX_HASH_FILE_SIZE }
             .groupBy { it.size }
-            .filter { it.value.size > 1 }
-
-        val duplicates = mutableListOf<DuplicateGroup>()
-
-        sizeGroups.values.forEach { group ->
-            val hashGroups = group.groupBy { file ->
-                calculateFileHash(File(file.path))
-            }.filter { it.value.size > 1 }
-
-            hashGroups.values.forEach { duplicateFiles ->
-                duplicates.add(
-                    DuplicateGroup(
-                        files = duplicateFiles,
-                        totalSize = duplicateFiles.sumOf { it.size }
-                    )
+            .filterValues { it.size > 1 }
+        var completed = 0
+        candidates.values.forEach { sameSize ->
+            val identicalGroups = sameSize.groupBy { calculateFileHash(File(it.path)) }
+                .filter { (hash, group) -> hash != null && group.size > 1 }
+            identicalGroups.values.forEach { group ->
+                val ordered = group.sortedBy { it.lastModified }
+                output += DuplicateGroup(
+                    files = ordered,
+                    totalSize = ordered.drop(1).sumOf { it.size }
                 )
             }
+            completed++
+            _progress.value = ScanProgress("正在校验文件指纹", completed, candidates.size, ScanPhase.FINDING_DUPLICATES)
         }
-
-        return duplicates.sortedByDescending { it.totalSize }
+        return output.sortedByDescending { it.totalSize }
     }
 
-    private fun calculateFileHash(file: File): String {
-        return try {
-            val digest = MessageDigest.getInstance("MD5")
-            file.inputStream().use { input ->
-                val buffer = ByteArray(8192)
-                var read = input.read(buffer)
-                while (read != -1) {
-                    digest.update(buffer, 0, read)
-                    read = input.read(buffer)
-                }
+    private fun calculateFileHash(file: File): String? = try {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
             }
-            digest.digest().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            file.absolutePath // Fallback to path if can't hash
         }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    } catch (e: Exception) {
+        Log.w(TAG, "无法读取文件: ${file.path}")
+        null
     }
 
-    private fun calculateDirSize(dir: File?): Long {
-        if (dir == null || !dir.exists()) return 0
-        return dir.walkTopDown()
-            .filter { it.isFile }
-            .sumOf { it.length() }
-    }
-
-    private fun getLastUsedTime(packageName: String): Long {
-        return try {
-            val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
-            val endTime = System.currentTimeMillis()
-            val startTime = endTime - 30L * 24 * 60 * 60 * 1000 // Last 30 days
-            val stats = usageStatsManager?.queryUsageStats(
-                android.app.usage.UsageStatsManager.INTERVAL_DAILY,
-                startTime,
-                endTime
-            )
-            stats?.filter { it.packageName == packageName }
-                ?.maxByOrNull { it.lastTimeUsed }
-                ?.lastTimeUsed ?: 0L
-        } catch (e: Exception) {
-            0L
-        }
-    }
+    private fun getLastUsedTime(packageName: String): Long = try {
+        val usage = context.getSystemService(Context.USAGE_STATS_SERVICE) as android.app.usage.UsageStatsManager
+        val end = System.currentTimeMillis()
+        usage.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, end - 90L * DAY, end)
+            ?.filter { it.packageName == packageName }?.maxOfOrNull { it.lastTimeUsed } ?: 0L
+    } catch (_: Exception) { 0L }
 
     fun getStorageStats(): StorageStats {
         val stat = StatFs(Environment.getExternalStorageDirectory().path)
-        val totalBytes = stat.totalBytes
-        val freeBytes = stat.availableBytes
-        val usedBytes = totalBytes - freeBytes
+        val total = stat.totalBytes
+        val free = stat.availableBytes
+        return StorageStats(total, total - free, free, if (total > 0) ((total - free) * 100 / total).toInt() else 0)
+    }
 
-        return StorageStats(
-            totalBytes = totalBytes,
-            usedBytes = usedBytes,
-            freeBytes = freeBytes,
-            usedPercentage = (usedBytes * 100 / totalBytes).toInt()
-        )
+    companion object {
+        private const val TAG = "StorageScanner"
+        private const val MAX_DEPTH = 7
+        private const val MAX_SCANNED_FILES = 25_000
+        private const val MIN_DUPLICATE_SIZE = 4L * 1024
+        private const val MAX_HASH_FILE_SIZE = 512L * 1024 * 1024
+        private const val DAY = 24L * 60 * 60 * 1000
+        private val TEMP_EXTENSIONS = setOf("tmp", "temp", "bak", "old", "swp")
     }
 }
 
-data class StorageStats(
-    val totalBytes: Long,
-    val usedBytes: Long,
-    val freeBytes: Long,
-    val usedPercentage: Int
-)
+data class StorageStats(val totalBytes: Long, val usedBytes: Long, val freeBytes: Long, val usedPercentage: Int)
