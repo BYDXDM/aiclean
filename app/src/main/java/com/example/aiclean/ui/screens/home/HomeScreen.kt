@@ -53,7 +53,7 @@ import com.example.aiclean.core.scanner.ScanResult
 import com.example.aiclean.core.scanner.StorageStats
 import com.example.aiclean.ui.components.AccessLevelCard
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     onNavigateToApps: () -> Unit,
@@ -328,7 +328,7 @@ fun ScanProgressCard(phase: ScanPhase, progress: Float) {
             Spacer(modifier = Modifier.height(8.dp))
 
             LinearProgressIndicator(
-                progress = { progress },
+                progress = progress,
                 modifier = Modifier.fillMaxWidth()
             )
 
