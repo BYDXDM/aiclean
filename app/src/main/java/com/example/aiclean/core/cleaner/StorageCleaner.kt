@@ -19,6 +19,16 @@ class StorageCleaner @Inject constructor(
     private val shizukuManager: ShizukuManager
 ) {
     suspend fun cleanCache(packageName: String): CleanResult = withContext(Dispatchers.IO) {
+        if (shizukuManager.isPermissionGranted.first()) {
+            val safePackage = packageName.takeIf { it.matches(Regex("[A-Za-z0-9._]+")) }
+                ?: return@withContext CleanResult(false, 0, emptyList(), "无效的应用包名")
+            val command = listOf(
+                "/data/user/0/$safePackage/cache", "/data/user/0/$safePackage/code_cache",
+                "/data/data/$safePackage/cache", "/data/data/$safePackage/code_cache"
+            ).joinToString("; ") { "rm -rf '$it'" }
+            val result = shizukuManager.executeCommand(command)
+            if (result.success) return@withContext CleanResult(true, 0, listOf(packageName), "已通过 Shizuku 清理 ${packageName} 的缓存")
+        }
         if (rootManager.isRootAvailable()) {
             // pm clear 会删除应用数据，绝不能用于“清缓存”。只触及 cache 与 code_cache。
             val safePackage = packageName.takeIf { it.matches(Regex("[A-Za-z0-9._]+")) }
