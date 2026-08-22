@@ -13,6 +13,7 @@ import com.example.aiclean.core.scanner.ScanResult
 import com.example.aiclean.core.scanner.StorageScanner
 import com.example.aiclean.core.scanner.StorageStats
 import com.example.aiclean.core.settings.SettingsRepository
+import com.example.aiclean.core.shizuku.ShizukuManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +38,7 @@ data class HomeUiState(
 class HomeViewModel @Inject constructor(
     private val scanner: StorageScanner,
     private val cleaner: StorageCleaner,
+    private val shizukuManager: ShizukuManager,
     private val aiService: AIService,
     private val settingsRepository: SettingsRepository
 ) : ViewModel() {
@@ -62,6 +64,10 @@ class HomeViewModel @Inject constructor(
             val level = cleaner.getAccessLevel()
             _uiState.value = _uiState.value.copy(accessLevel = level)
         }
+    }
+
+    fun requestShizukuPermission() {
+        shizukuManager.requestPermission()
     }
 
     fun startScan() {

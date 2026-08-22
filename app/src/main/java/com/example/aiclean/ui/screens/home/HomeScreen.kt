@@ -100,7 +100,10 @@ fun HomeScreen(
 
             // Access Level Card
             item {
-                AccessLevelCard(accessLevel = uiState.accessLevel)
+                AccessLevelCard(
+                    accessLevel = uiState.accessLevel,
+                    onRequestShizuku = { viewModel.requestShizukuPermission() }
+                )
             }
 
             // Scan Progress
